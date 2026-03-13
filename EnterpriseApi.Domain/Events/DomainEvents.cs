@@ -1,20 +1,20 @@
 namespace EnterpriseApi.Domain.Events;
 
-//Base Domain Event
+// ─── Base Domain Event ────────────────────────────────────────────────────────
 // Domain events represent facts that happened in the domain.
-// They are serialized and published to Kafka topic
-// EventType string is used as Kafka message key for routing
+// They are serialized and published to Kafka topics.
+// The EventType string is used as the Kafka message key for routing.
 
 public abstract record DomainEvent
 {
     public Guid EventId { get; init; } = Guid.NewGuid();
-    public DateTime OccurredAt { get; init;} = DateTime.UtcNow;
+    public DateTime OccurredAt { get; init; } = DateTime.UtcNow;
     public abstract string EventType { get; }
-    public string Version {get; init; } = "1.0";
+    public string Version { get; init; } = "1.0";
 }
 
-// Order Event
-public record OrderCreatedEvent: DomainEvent
+// ─── Order Events ─────────────────────────────────────────────────────────────
+public record OrderCreatedEvent : DomainEvent
 {
     public override string EventType => "order.created";
     public required Guid OrderId { get; init; }
@@ -23,10 +23,9 @@ public record OrderCreatedEvent: DomainEvent
     public required int Quantity { get; init; }
     public required decimal TotalAmount { get; init; }
     public required string ProductName { get; init; }
-
 }
 
-public record OrderCancelledEvent: DomainEvent
+public record OrderCancelledEvent : DomainEvent
 {
     public override string EventType => "order.cancelled";
     public required Guid OrderId { get; init; }
@@ -36,17 +35,17 @@ public record OrderCancelledEvent: DomainEvent
     public string? CancellationReason { get; init; }
 }
 
-public record OrderCompletedEvent: DomainEvent
+public record OrderCompletedEvent : DomainEvent
 {
     public override string EventType => "order.completed";
     public required Guid OrderId { get; init; }
-    public required Guid UserId {get; init;}
+    public required Guid UserId { get; init; }
     public required Guid InvoiceId { get; init; }
     public required decimal Amount { get; init; }
 }
 
-//Inventory Events
-public record InventoryReservedEvent: DomainEvent
+// ─── Inventory Events ─────────────────────────────────────────────────────────
+public record InventoryReservedEvent : DomainEvent
 {
     public override string EventType => "inventory.reserved";
     public required Guid ProductId { get; init; }
@@ -55,8 +54,7 @@ public record InventoryReservedEvent: DomainEvent
     public required int QuantityRemaining { get; init; }
 }
 
-
-public record InventoryLowStockEvent: DomainEvent
+public record InventoryLowStockEvent : DomainEvent
 {
     public override string EventType => "inventory.low_stock";
     public required Guid ProductId { get; init; }
@@ -65,7 +63,7 @@ public record InventoryLowStockEvent: DomainEvent
     public required int ThresholdLevel { get; init; }
 }
 
-public record InventoryRestockedEvent: DomainEvent
+public record InventoryRestockedEvent : DomainEvent
 {
     public override string EventType => "inventory.restocked";
     public required Guid ProductId { get; init; }
@@ -73,18 +71,17 @@ public record InventoryRestockedEvent: DomainEvent
     public required int NewTotalStock { get; init; }
 }
 
-// Invoice Events
-public record InvoiceGeneratedEvent: DomainEvent
+// ─── Invoice Events ───────────────────────────────────────────────────────────
+public record InvoiceGeneratedEvent : DomainEvent
 {
     public override string EventType => "invoice.generated";
     public required Guid InvoiceId { get; init; }
     public required Guid OrderId { get; init; }
     public required Guid UserId { get; init; }
     public required decimal Amount { get; init; }
-   
 }
 
-public record InvoicePaidEvent: DomainEvent
+public record InvoicePaidEvent : DomainEvent
 {
     public override string EventType => "invoice.paid";
     public required Guid InvoiceId { get; init; }
@@ -92,24 +89,22 @@ public record InvoicePaidEvent: DomainEvent
     public required decimal AmountPaid { get; init; }
 }
 
-// Notification Events
-public record NotificationRequestedEvent: DomainEvent
+// ─── Notification Events ──────────────────────────────────────────────────────
+public record NotificationRequestedEvent : DomainEvent
 {
     public override string EventType => "notification.requested";
     public required Guid UserId { get; init; }
-    public required string Channel { get; init; } // e.g., "email", "sms"
+    public required string Channel { get; init; } // "Email" | "SMS" | "Push"
     public required string Subject { get; init; }
     public required string Body { get; init; }
     public string? TemplateId { get; init; }
 }
 
-// User Events
-public record UserRegisteredEvent: DomainEvent
+// ─── User Events ──────────────────────────────────────────────────────────────
+public record UserRegisteredEvent : DomainEvent
 {
     public override string EventType => "user.registered";
     public required Guid UserId { get; init; }
     public required string Email { get; init; }
     public required string FirstName { get; init; }
 }
-
-

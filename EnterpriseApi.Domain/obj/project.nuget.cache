@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "dgSpecHash": "U2yBCsnvwAQ=",
+  "success": true,
+  "projectFilePath": "D:\\Dev\\EnterpriseApi\\EnterpriseApi.Domain\\EnterpriseApi.Domain.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\johnw\\.nuget\\packages\\microsoft.netcore.app.ref\\8.0.25\\microsoft.netcore.app.ref.8.0.25.nupkg.sha512",
+    "C:\\Users\\johnw\\.nuget\\packages\\microsoft.windowsdesktop.app.ref\\8.0.25\\microsoft.windowsdesktop.app.ref.8.0.25.nupkg.sha512",
+    "C:\\Users\\johnw\\.nuget\\packages\\microsoft.aspnetcore.app.ref\\8.0.25\\microsoft.aspnetcore.app.ref.8.0.25.nupkg.sha512"
+  ],
+  "logs": []
+}

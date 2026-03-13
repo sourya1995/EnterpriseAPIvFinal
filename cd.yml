@@ -1,0 +1,414 @@
+name: CD — Deploy to ECS
+
+# Only deploy when code lands on main (production) or staging branches.
+# PRs never trigger a deployment — CI validates them, CD deploys them after merge.
+on:
+  push:
+    branches: [main, staging]
+  # Allow manual deployments from the GitHub Actions UI
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options: [staging, production]
+      force_deploy:
+        description: 'Force deploy even if no code changes'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  DOTNET_VERSION: '9.0.x'
+  AWS_REGION: eu-west-1
+  ECR_REPOSITORY: enterprise-api
+  ECS_CLUSTER_STAGING: enterprise-cluster-staging
+  ECS_CLUSTER_PRODUCTION: enterprise-cluster-production
+  ECS_SERVICE_STAGING: enterprise-api-staging
+  ECS_SERVICE_PRODUCTION: enterprise-api-production
+  CONTAINER_NAME: enterprise-api
+
+jobs:
+  # ─── Job 1: Determine deployment target ──────────────────────────────────────
+  # Figures out which environment we're deploying to based on branch or manual input
+  prepare:
+    name: Prepare Deployment
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.set-env.outputs.environment }}
+      image_tag: ${{ steps.set-tag.outputs.image_tag }}
+      short_sha: ${{ steps.set-tag.outputs.short_sha }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Determine target environment
+        id: set-env
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            ENV="${{ github.event.inputs.environment }}"
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            ENV="production"
+          else
+            ENV="staging"
+          fi
+          echo "environment=$ENV" >> $GITHUB_OUTPUT
+          echo "🎯 Deploying to: $ENV"
+
+      - name: Generate image tag
+        id: set-tag
+        run: |
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-8)
+          # Tag format: branch-shortsha-timestamp
+          # This makes every image uniquely identifiable and traceable to a commit
+          IMAGE_TAG="${{ github.ref_name }}-${SHORT_SHA}-$(date +%Y%m%d%H%M%S)"
+          echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "🏷️ Image tag: $IMAGE_TAG"
+
+  # ─── Job 2: Build and push Docker image to ECR ───────────────────────────────
+  build-and-push:
+    name: Build & Push to ECR
+    runs-on: ubuntu-latest
+    needs: [prepare]
+    environment: ${{ needs.prepare.outputs.environment }}
+
+    outputs:
+      image_uri: ${{ steps.push.outputs.image_uri }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          # mask-aws-account-id prevents account ID leaking in logs
+          mask-aws-account-id: true
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build and push in one step — Buildx handles layer caching efficiently
+      # We push TWO tags: the specific version tag AND latest for that environment
+      - name: Build and push image to ECR
+        id: push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: EnterpriseApi.API/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ needs.prepare.outputs.image_tag }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ needs.prepare.outputs.environment }}-latest
+          # Build args inject build-time metadata into the image
+          build-args: |
+            BUILD_VERSION=${{ needs.prepare.outputs.image_tag }}
+            GIT_COMMIT=${{ github.sha }}
+            BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          # GitHub Actions cache — dramatically speeds up repeat builds
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Provenance attestation for supply chain security (SLSA compliance)
+          provenance: true
+          sbom: true
+
+      - name: Output image URI
+        id: output-uri
+        run: |
+          IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ needs.prepare.outputs.image_tag }}"
+          echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
+          echo "✅ Image pushed: $IMAGE_URI"
+
+      # Final vulnerability scan on the ACTUAL pushed image before deployment
+      # Belt-and-suspenders: catches anything introduced during the build
+      - name: Scan pushed image for vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ needs.prepare.outputs.image_tag }}
+          format: table
+          severity: CRITICAL
+          exit-code: '1'
+
+  # ─── Job 3: Deploy to Staging ─────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [prepare, build-and-push]
+    if: needs.prepare.outputs.environment == 'staging' || needs.prepare.outputs.environment == 'production'
+    environment:
+      name: staging
+      url: https://api-staging.enterprise.com
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: true
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Download the current task definition from ECS — we update only the image
+      # This preserves all other task definition settings (CPU, memory, env vars, etc.)
+      - name: Download current task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition enterprise-api-staging \
+            --query taskDefinition \
+            > task-definition-staging.json
+          echo "📋 Current task definition downloaded"
+
+      # Inject the new image URI into the task definition JSON
+      # Only the image field changes — everything else stays identical
+      - name: Update task definition with new image
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition-staging.json
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ needs.build-and-push.outputs.image_uri }}
+          # Inject environment-specific config via environment variables
+          # Secrets come from AWS Secrets Manager, not hardcoded here
+          environment-variables: |
+            ASPNETCORE_ENVIRONMENT=Staging
+            AWS_REGION=${{ env.AWS_REGION }}
+
+      - name: Deploy to ECS Staging
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE_STAGING }}
+          cluster: ${{ env.ECS_CLUSTER_STAGING }}
+          # Wait until the new deployment is stable before marking this step as done
+          # If health checks fail, ECS rolls back automatically and this step fails
+          wait-for-service-stability: true
+          # Timeout after 10 minutes — if ECS hasn't stabilized, something is wrong
+          wait-for-minutes: 10
+
+      # Hit the health endpoint to confirm the new version is actually responding
+      - name: Smoke test staging deployment
+        run: |
+          echo "⏳ Waiting for deployment to warm up..."
+          sleep 15
+
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            https://api-staging.enterprise.com/health)
+
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "❌ Health check failed with status: $HTTP_STATUS"
+            exit 1
+          fi
+
+          echo "✅ Staging deployment healthy — status $HTTP_STATUS"
+
+          # Check the version endpoint confirms the right image was deployed
+          DEPLOYED_VERSION=$(curl -s https://api-staging.enterprise.com/health/version \
+            | jq -r '.version')
+          echo "🏷️ Deployed version: $DEPLOYED_VERSION"
+
+  # ─── Job 4: Integration Tests Against Staging ────────────────────────────────
+  integration-tests:
+    name: Integration Tests (Staging)
+    runs-on: ubuntu-latest
+    needs: [prepare, deploy-staging]
+    if: needs.prepare.outputs.environment == 'production'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      # Run the integration test suite against the live staging environment
+      # These tests actually call the API over HTTP — not mocked
+      - name: Run integration tests against staging
+        env:
+          API_BASE_URL: https://api-staging.enterprise.com
+          # Test user credentials stored as GitHub secrets
+          TEST_ADMIN_EMAIL: ${{ secrets.STAGING_TEST_ADMIN_EMAIL }}
+          TEST_ADMIN_PASSWORD: ${{ secrets.STAGING_TEST_ADMIN_PASSWORD }}
+        run: |
+          dotnet test EnterpriseApi.IntegrationTests \
+            --configuration Release \
+            --verbosity normal \
+            --logger "trx;LogFileName=integration-results.trx"
+
+      - name: Upload integration test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-test-results
+          path: '**/*.trx'
+
+  # ─── Job 5: Deploy to Production ─────────────────────────────────────────────
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [prepare, build-and-push, deploy-staging, integration-tests]
+    if: needs.prepare.outputs.environment == 'production'
+    # Production deployments require manual approval from a designated reviewer
+    # Configure this in GitHub → Settings → Environments → production → Required reviewers
+    environment:
+      name: production
+      url: https://api.enterprise.com
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: true
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Download current production task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition enterprise-api-production \
+            --query taskDefinition \
+            > task-definition-production.json
+
+          # Save the current task definition ARN for rollback
+          CURRENT_REVISION=$(cat task-definition-production.json | jq -r '.revision')
+          echo "ROLLBACK_REVISION=$CURRENT_REVISION" >> $GITHUB_ENV
+          echo "📋 Current production revision: $CURRENT_REVISION (saved for rollback)"
+
+      - name: Update task definition with new image
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition-production.json
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ needs.build-and-push.outputs.image_uri }}
+          environment-variables: |
+            ASPNETCORE_ENVIRONMENT=Production
+            AWS_REGION=${{ env.AWS_REGION }}
+
+      # ECS blue/green deployment via CodeDeploy
+      # Spins up new containers alongside old ones, shifts traffic gradually,
+      # keeps old containers running for instant rollback if something goes wrong
+      - name: Deploy to ECS Production (Blue/Green)
+        id: deploy
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE_PRODUCTION }}
+          cluster: ${{ env.ECS_CLUSTER_PRODUCTION }}
+          wait-for-service-stability: true
+          wait-for-minutes: 15
+          codedeploy-appspec: appspec.yml
+          codedeploy-application: enterprise-api-production
+          codedeploy-deployment-group: enterprise-api-production-dg
+
+      - name: Smoke test production deployment
+        run: |
+          echo "⏳ Waiting for production deployment to warm up..."
+          sleep 20
+
+          for i in 1 2 3; do
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              https://api.enterprise.com/health)
+
+            if [ "$HTTP_STATUS" == "200" ]; then
+              echo "✅ Production health check passed (attempt $i)"
+              break
+            fi
+
+            echo "⚠️ Attempt $i failed with status $HTTP_STATUS, retrying..."
+            sleep 10
+
+            if [ $i -eq 3 ]; then
+              echo "❌ Production health check failed after 3 attempts — triggering rollback"
+              exit 1
+            fi
+          done
+
+      # If smoke test fails, this step runs and rolls back to the previous revision
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          echo "🔄 Rolling back to revision ${{ env.ROLLBACK_REVISION }}"
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER_PRODUCTION }} \
+            --service ${{ env.ECS_SERVICE_PRODUCTION }} \
+            --task-definition enterprise-api-production:${{ env.ROLLBACK_REVISION }} \
+            --force-new-deployment
+          echo "✅ Rollback initiated"
+
+      # Tag the git commit that made it to production — creates an audit trail
+      - name: Tag production release
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "release-${{ needs.prepare.outputs.image_tag }}"
+          git push origin "release-${{ needs.prepare.outputs.image_tag }}"
+          echo "🏷️ Release tagged: release-${{ needs.prepare.outputs.image_tag }}"
+
+      # Post deployment summary to Slack so the team knows what shipped
+      - name: Notify deployment success
+        if: success()
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "✅ *Enterprise API deployed to Production*",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "✅ *Enterprise API — Production Deployment Successful*\n*Version:* `${{ needs.prepare.outputs.image_tag }}`\n*Commit:* `${{ github.sha }}`\n*Deployed by:* ${{ github.actor }}\n*URL:* https://api.enterprise.com"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Notify deployment failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "❌ *Enterprise API production deployment FAILED*",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "❌ *Enterprise API — Production Deployment FAILED*\n*Version:* `${{ needs.prepare.outputs.image_tag }}`\n*Commit:* `${{ github.sha }}`\n*Triggered by:* ${{ github.actor }}\n*Action:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

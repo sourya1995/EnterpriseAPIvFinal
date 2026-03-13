@@ -1,8 +1,6 @@
-using EnterpriseApi.Domain.Entities;
-
 namespace EnterpriseApi.Application.DTOs;
 
-// Pagination
+// ─── Pagination ───────────────────────────────────────────────────────────────
 public record PagedResult<T>(
     IEnumerable<T> Items,
     int TotalCount,
@@ -11,8 +9,7 @@ public record PagedResult<T>(
     int TotalPages
 );
 
-
-// User DTOs
+// ─── User DTOs ────────────────────────────────────────────────────────────────
 public record UserDto(
     Guid Id,
     string Email,
@@ -31,36 +28,15 @@ public record CreateUserRequest(
     string Role
 );
 
-public record UpdateUserRequest(
-    string FirstName,
-    string LastName
-);
+public record UpdateUserRequest(string FirstName, string LastName);
+public record ChangeRoleRequest(string Role);
 
-public record ChangeRoleRequest(
-    string Role
-);
+// ─── Auth DTOs ────────────────────────────────────────────────────────────────
+public record LoginRequest(string Email, string Password);
+public record RegisterRequest(string Email, string Password, string FirstName, string LastName);
+public record AuthResponse(string Token, string Email, string Role, DateTime ExpiresAt);
 
-// Auth DTOs
-public record LoginRequest(
-    string Email,
-    string Password
-);
-
-public record RegisterRequest(
-    string Email,
-    string Password,
-    string FirstName,
-    string LastName
-);
-
-public record AuthResponse(
-    string Token,
-    string Email,
-    string Role,
-    DateTime ExpiresAt
-);
-
-// Product DTOs
+// ─── Product DTOs ─────────────────────────────────────────────────────────────
 public record ProductDto(
     Guid Id,
     string Name,
@@ -70,7 +46,7 @@ public record ProductDto(
     decimal BasePrice,
     decimal? DiscountedPrice,
     decimal EffectivePrice,
-    bool isActive,
+    bool IsActive,
     InventoryDto? Inventory
 );
 
@@ -80,24 +56,15 @@ public record CreateProductRequest(
     string SKU,
     string Category,
     decimal BasePrice,
-    int InitialStock, 
+    int InitialStock,
     int LowStockThreshold = 10
 );
 
-public record UpdateProductRequest(
-    string Name,
-    string Description,
-    string Category
-);
+public record UpdateProductRequest(string Name, string Description, string Category);
+public record ApplyDiscountRequest(decimal DiscountedPrice);
+public record RestockRequest(int Quantity);
 
-public record ApplyDiscountRequest(
-    decimal DiscountedPrice
-);
-
-public record RestockRequest(
-    int Quantity
-);
-
+// ─── Inventory DTOs ───────────────────────────────────────────────────────────
 public record InventoryDto(
     Guid ProductId,
     int TotalStock,
@@ -108,8 +75,7 @@ public record InventoryDto(
     DateTime LastUpdated
 );
 
-// Order DTOs
-
+// ─── Order DTOs ───────────────────────────────────────────────────────────────
 public record OrderDto(
     Guid Id,
     Guid UserId,
@@ -129,15 +95,12 @@ public record CreateOrderRequest(
     int Quantity
 );
 
-public record CancelOrderRequest(
-    string Reason
-);
+public record CancelOrderRequest(string Reason);
 
-// Invoice DTOs
+// ─── Invoice DTOs ─────────────────────────────────────────────────────────────
 public record InvoiceDto(
     Guid Id,
     Guid OrderId,
-    Guid UserId,
     string InvoiceNumber,
     decimal Subtotal,
     decimal TaxAmount,
@@ -151,11 +114,9 @@ public record InvoiceDto(
     bool IsOverdue
 );
 
-public record PayInvoiceRequest(
-    string PaymentReference
-);
+public record PayInvoiceRequest(string PaymentReference);
 
-// Notification DTOs
+// ─── Notification DTOs ────────────────────────────────────────────────────────
 public record NotificationDto(
     Guid Id,
     Guid UserId,
@@ -167,7 +128,7 @@ public record NotificationDto(
     DateTime? SentAt
 );
 
-// Audit Log DTOs
+// ─── Audit DTOs ───────────────────────────────────────────────────────────────
 public record AuditLogDto(
     Guid Id,
     string EntityName,

@@ -1,0 +1,20 @@
+version: 0.0
+Resources:
+  - TargetService:
+      Type: AWS::ECS::Service
+      Properties:
+        TaskDefinition: <TASK_DEFINITION>
+        LoadBalancerInfo:
+          ContainerName: "enterprise-api"
+          ContainerPort: 8080
+        # Blue/green deployment:
+        # 1. New tasks (green) start alongside existing tasks (blue)
+        # 2. Traffic shifts to green after health checks pass
+        # 3. Blue tasks are kept alive for the termination wait time
+        # 4. If you catch a problem, you can re-route to blue within this window
+        PlatformVersion: "LATEST"
+
+Hooks:
+  # Run validation after traffic shifts to the new deployment
+  # If this Lambda returns failure, CodeDeploy rolls back automatically
+  - AfterAllowTraffic: "enterprise-api-post-deploy-validation"

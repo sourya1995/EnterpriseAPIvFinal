@@ -1,0 +1,142 @@
+name: Rollback — Emergency Revert
+
+# Manual trigger only — never automatic.
+# Used when something slips through all checks and causes a production incident.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to roll back'
+        required: true
+        type: choice
+        options: [staging, production]
+      task_definition_revision:
+        description: 'ECS task definition revision to roll back to (e.g. 42). Leave empty to roll back to previous.'
+        required: false
+        type: string
+      reason:
+        description: 'Reason for rollback (for audit log)'
+        required: true
+        type: string
+
+env:
+  AWS_REGION: eu-west-1
+  ECS_CLUSTER_STAGING: enterprise-cluster-staging
+  ECS_CLUSTER_PRODUCTION: enterprise-cluster-production
+  ECS_SERVICE_STAGING: enterprise-api-staging
+  ECS_SERVICE_PRODUCTION: enterprise-api-production
+
+jobs:
+  rollback:
+    name: Execute Rollback
+    runs-on: ubuntu-latest
+    # Rollbacks require the same environment protection as deployments
+    # Production rollbacks still need approval from a reviewer
+    environment: ${{ github.event.inputs.environment }}
+
+    steps:
+      - name: Log rollback intent
+        run: |
+          echo "🚨 ROLLBACK INITIATED"
+          echo "Environment: ${{ github.event.inputs.environment }}"
+          echo "Requested by: ${{ github.actor }}"
+          echo "Reason: ${{ github.event.inputs.reason }}"
+          echo "Target revision: ${{ github.event.inputs.task_definition_revision || 'previous' }}"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: true
+
+      - name: Determine cluster and service
+        id: target
+        run: |
+          if [[ "${{ github.event.inputs.environment }}" == "production" ]]; then
+            echo "cluster=${{ env.ECS_CLUSTER_PRODUCTION }}" >> $GITHUB_OUTPUT
+            echo "service=${{ env.ECS_SERVICE_PRODUCTION }}" >> $GITHUB_OUTPUT
+            echo "task_family=enterprise-api-production" >> $GITHUB_OUTPUT
+          else
+            echo "cluster=${{ env.ECS_CLUSTER_STAGING }}" >> $GITHUB_OUTPUT
+            echo "service=${{ env.ECS_SERVICE_STAGING }}" >> $GITHUB_OUTPUT
+            echo "task_family=enterprise-api-staging" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Determine rollback revision
+        id: revision
+        run: |
+          if [[ -n "${{ github.event.inputs.task_definition_revision }}" ]]; then
+            # Use explicitly specified revision
+            REVISION="${{ github.event.inputs.task_definition_revision }}"
+          else
+            # Automatically find the previous stable revision
+            # Lists all revisions, gets the second most recent (skip current)
+            CURRENT=$(aws ecs describe-services \
+              --cluster ${{ steps.target.outputs.cluster }} \
+              --services ${{ steps.target.outputs.service }} \
+              --query 'services[0].taskDefinition' \
+              --output text | grep -oP ':\K\d+$')
+
+            REVISION=$((CURRENT - 1))
+            echo "Current revision: $CURRENT, rolling back to: $REVISION"
+          fi
+
+          echo "revision=$REVISION" >> $GITHUB_OUTPUT
+          echo "🎯 Will roll back to revision: $REVISION"
+
+      - name: Execute rollback
+        run: |
+          TASK_DEF="${{ steps.target.outputs.task_family }}:${{ steps.revision.outputs.revision }}"
+          echo "🔄 Rolling back to $TASK_DEF"
+
+          aws ecs update-service \
+            --cluster ${{ steps.target.outputs.cluster }} \
+            --service ${{ steps.target.outputs.service }} \
+            --task-definition $TASK_DEF \
+            --force-new-deployment
+
+          echo "⏳ Waiting for rollback to stabilize..."
+          aws ecs wait services-stable \
+            --cluster ${{ steps.target.outputs.cluster }} \
+            --services ${{ steps.target.outputs.service }}
+
+          echo "✅ Rollback complete"
+
+      - name: Verify rollback health
+        run: |
+          if [[ "${{ github.event.inputs.environment }}" == "production" ]]; then
+            URL="https://api.enterprise.com/health"
+          else
+            URL="https://api-staging.enterprise.com/health"
+          fi
+
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL")
+
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "❌ Health check after rollback returned $HTTP_STATUS"
+            exit 1
+          fi
+
+          echo "✅ Service healthy after rollback — status $HTTP_STATUS"
+
+      - name: Notify rollback completion
+        if: always()
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "🔄 *Enterprise API Rollback — ${{ job.status }}*",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "🔄 *Enterprise API Rollback*\n*Environment:* ${{ github.event.inputs.environment }}\n*Status:* ${{ job.status }}\n*Rolled back to revision:* ${{ steps.revision.outputs.revision }}\n*Executed by:* ${{ github.actor }}\n*Reason:* ${{ github.event.inputs.reason }}"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

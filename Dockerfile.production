@@ -1,0 +1,108 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-stage Dockerfile
+#
+# Stage 1 (build):  Full SDK image — compiles the app, runs as root, large image
+# Stage 2 (final):  Runtime-only image — no SDK, no compiler, minimal attack surface
+#
+# Why multi-stage?
+# The SDK image is ~800MB. The runtime image is ~220MB.
+# More importantly, the SDK image contains build tools an attacker could use.
+# The final image has ONLY what is needed to run the app — nothing else.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─── Stage 1: Build ──────────────────────────────────────────────────────────
+FROM mcr.microsoft.com/dotnet/sdk:9.0-alpine AS build
+
+# Build arguments — injected by the CI pipeline for traceability
+ARG BUILD_VERSION=local
+ARG GIT_COMMIT=unknown
+ARG BUILD_DATE=unknown
+
+WORKDIR /src
+
+# Copy csproj files first and restore — this creates a cacheable layer.
+# Docker layer caching means if no .csproj files changed, restore is skipped
+# entirely on the next build. This saves 30-60 seconds per build.
+COPY EnterpriseApi.Domain/EnterpriseApi.Domain.csproj EnterpriseApi.Domain/
+COPY EnterpriseApi.Application/EnterpriseApi.Application.csproj EnterpriseApi.Application/
+COPY EnterpriseApi.Infrastructure/EnterpriseApi.Infrastructure.csproj EnterpriseApi.Infrastructure/
+COPY EnterpriseApi.API/EnterpriseApi.API.csproj EnterpriseApi.API/
+
+RUN dotnet restore EnterpriseApi.API/EnterpriseApi.API.csproj \
+    --runtime linux-musl-x64
+
+# Copy source code AFTER restore — source changes don't invalidate the restore cache
+COPY EnterpriseApi.Domain/ EnterpriseApi.Domain/
+COPY EnterpriseApi.Application/ EnterpriseApi.Application/
+COPY EnterpriseApi.Infrastructure/ EnterpriseApi.Infrastructure/
+COPY EnterpriseApi.API/ EnterpriseApi.API/
+
+# Publish — self-contained, trimmed, single-file
+# --self-contained: includes the .NET runtime in the image (no runtime dependency)
+# /p:PublishTrimmed: removes unused assemblies — reduces image size by ~30%
+# /p:PublishSingleFile: single executable — easier to reason about what's in the image
+RUN dotnet publish EnterpriseApi.API/EnterpriseApi.API.csproj \
+    --configuration Release \
+    --runtime linux-musl-x64 \
+    --self-contained true \
+    /p:PublishTrimmed=true \
+    /p:PublishSingleFile=false \
+    /p:TreatWarningsAsErrors=true \
+    --output /app/publish
+
+# ─── Stage 2: Final Runtime Image ────────────────────────────────────────────
+FROM mcr.microsoft.com/dotnet/aspnet:9.0-alpine AS final
+
+# Install security updates on the base image
+# This is critical — base images are not always up to date with OS patches
+RUN apk update && apk upgrade --no-cache && \
+    # curl is needed for health checks in ECS
+    apk add --no-cache curl && \
+    # Clean up package cache to keep image small
+    rm -rf /var/cache/apk/*
+
+WORKDIR /app
+
+# Create a non-root user and group — never run containers as root in production
+# If the app is compromised, the attacker has limited OS privileges
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+
+# Copy only the published output from the build stage — nothing from the SDK
+COPY --from=build /app/publish .
+
+# Set correct ownership on app files
+RUN chown -R appuser:appgroup /app
+
+# Switch to non-root user — all subsequent commands run as appuser
+USER appuser
+
+# Labels for image metadata — visible in ECR and Docker Hub
+# These make it easy to trace an image back to its source commit
+LABEL org.opencontainers.image.version="${BUILD_VERSION}" \
+      org.opencontainers.image.revision="${GIT_COMMIT}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.title="Enterprise API" \
+      org.opencontainers.image.description="Enterprise ASP.NET Core 9 API"
+
+# Port the app listens on inside the container
+# The ECS task definition maps this to the ALB target group
+EXPOSE 8080
+
+# Environment variables — defaults that can be overridden by ECS task definition
+ENV ASPNETCORE_URLS=http://+:8080 \
+    ASPNETCORE_ENVIRONMENT=Production \
+    DOTNET_RUNNING_IN_CONTAINER=true \
+    # Disable the startup banner — reduces log noise
+    DOTNET_NOLOGO=true \
+    # Enable structured JSON logging for CloudWatch
+    Logging__Console__FormatterName=json
+
+# Health check — ECS uses this to know if the container is ready to receive traffic
+# --interval: check every 30 seconds
+# --timeout: fail if no response within 5 seconds
+# --start-period: give the app 30 seconds to start before health checks begin
+# --retries: mark unhealthy after 3 consecutive failures
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+ENTRYPOINT ["dotnet", "EnterpriseApi.API.dll"]

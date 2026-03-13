@@ -1,9 +1,10 @@
-using EnterpriseApi.Domain.Enums;
-using EnterpriseApi.Domain.Events;
 using EnterpriseApi.Domain.Exceptions;
+
 namespace EnterpriseApi.Domain.Entities;
 
-//USER
+// ─────────────────────────────────────────────────────────────────────────────
+// USER
+// ─────────────────────────────────────────────────────────────────────────────
 public class User
 {
     public Guid Id { get; private set; }
@@ -20,17 +21,24 @@ public class User
     // Every UPDATE includes WHERE RowVersion = @original.
     // If another transaction modified the row, 0 rows affected → DbUpdateConcurrencyException.
     public uint RowVersion { get; private set; }
+
     private readonly List<Order> _orders = new();
     private readonly List<Notification> _notifications = new();
     private readonly List<Invoice> _invoices = new();
+
     public IReadOnlyCollection<Order> Orders => _orders.AsReadOnly();
     public IReadOnlyCollection<Notification> Notifications => _notifications.AsReadOnly();
     public IReadOnlyCollection<Invoice> Invoices => _invoices.AsReadOnly();
-    private User() { } // EF Core requires a parameterless constructor
-    public static User Create(string email, string passwordHash, string firstName, string lastName, string role)
+
+    private User() { }
+
+    public static User Create(string email, string passwordHash,
+        string firstName, string lastName, string role)
     {
-        if (string.IsNullOrWhiteSpace(email)) throw new InvariantViolationException("Email cannot be empty.");
-        if (string.IsNullOrWhiteSpace(passwordHash)) throw new InvariantViolationException("Password cannot be empty.");
+        if (string.IsNullOrWhiteSpace(email))
+            throw new InvariantViolationException("Email cannot be empty.");
+        if (string.IsNullOrWhiteSpace(passwordHash))
+            throw new InvariantViolationException("Password hash cannot be empty.");
 
         return new User
         {
@@ -45,75 +53,80 @@ public class User
         };
     }
 
-    public void UpdateProfile(string? firstName, string? lastName)
+    public void UpdateProfile(string firstName, string lastName)
     {
         if (string.IsNullOrWhiteSpace(firstName) || string.IsNullOrWhiteSpace(lastName))
-            throw new InvariantViolationException("At least one of first name or last name must be provided.");
+            throw new InvariantViolationException("Name fields cannot be empty.");
 
-        FirstName = firstName?.Trim();
-        LastName = lastName?.Trim();
+        FirstName = firstName.Trim();
+        LastName = lastName.Trim();
         UpdatedAt = DateTime.UtcNow;
-
     }
 
     public void ChangeRole(string newRole)
     {
-        if (newRole is not ("Admin" or "User" or "Manager")) throw new BusinessRuleException("INVALID_ROLE", $"Role {newRole} is not valid.");
+        if (newRole is not ("Admin" or "User" or "Manager"))
+            throw new BusinessRuleException("INVALID_ROLE", $"Role '{newRole}' is not valid.");
         Role = newRole;
         UpdatedAt = DateTime.UtcNow;
-
     }
 
     public void Deactivate()
     {
-        if (!IsActive) throw new BusinessRuleException("ALREADY_INACTIVE", "User is already inactive.");
+        if (!IsActive)
+            throw new BusinessRuleException("ALREADY_DEACTIVATED", "User is already deactivated.");
         IsActive = false;
         UpdatedAt = DateTime.UtcNow;
     }
 
     public void Activate()
     {
-        if (IsActive) throw new BusinessRuleException("ALREADY_ACTIVE", "User is already active.");
         IsActive = true;
         UpdatedAt = DateTime.UtcNow;
     }
-
-
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
 // PRODUCT
+// ─────────────────────────────────────────────────────────────────────────────
 public class Product
 {
     public Guid Id { get; private set; }
     public string Name { get; private set; } = null!;
     public string Description { get; private set; } = null!;
-    public string SKU { get; private set; } = null!; // Stock Keeping Unit — unique identifier
+    public string SKU { get; private set; } = null!;       // Stock Keeping Unit — unique identifier
     public string Category { get; private set; } = null!;
     public decimal BasePrice { get; private set; }
     public decimal? DiscountedPrice { get; private set; }
-    public bool isActive { get; private set; }
+    public bool IsActive { get; private set; }
     public DateTime CreatedAt { get; private set; }
     public DateTime? UpdatedAt { get; private set; }
     public uint RowVersion { get; private set; }
+
     public Inventory? Inventory { get; private set; }
+
     private readonly List<Order> _orders = new();
     public IReadOnlyCollection<Order> Orders => _orders.AsReadOnly();
-    private Product() { } // EF Core requires a parameterless constructor
-    public static Product Create(string name, string description, string sku, string category, decimal basePrice)
+
+    private Product() { }
+
+    public static Product Create(string name, string description, string sku,
+        string category, decimal basePrice)
     {
-        if (string.IsNullOrWhiteSpace(name)) throw new InvariantViolationException("Product name cannot be empty.");
-        if (string.IsNullOrWhiteSpace(sku)) throw new InvariantViolationException("SKU cannot be empty.");
-        if (basePrice <= 0) throw new InvariantViolationException("Base price must be positive.");
+        if (basePrice <= 0)
+            throw new InvariantViolationException("Base price must be positive.");
+        if (string.IsNullOrWhiteSpace(sku))
+            throw new InvariantViolationException("SKU cannot be empty.");
 
         return new Product
         {
             Id = Guid.NewGuid(),
             Name = name.Trim(),
-            Description = description.Trim(),
+            Description = description,
             SKU = sku.ToUpperInvariant().Trim(),
             Category = category,
             BasePrice = basePrice,
-            isActive = true,
+            IsActive = true,
             CreatedAt = DateTime.UtcNow
         };
     }
@@ -122,62 +135,57 @@ public class Product
 
     public void ApplyDiscount(decimal discountedPrice)
     {
-        if (discountedPrice <= 0 || discountedPrice >= BasePrice) throw new BusinessRuleException("INVALID_DISCOUNT", "Discounted price must be positive and less than the base price.");
+        if (discountedPrice <= 0 || discountedPrice >= BasePrice)
+            throw new BusinessRuleException("INVALID_DISCOUNT",
+                "Discounted price must be positive and less than base price.");
         DiscountedPrice = discountedPrice;
         UpdatedAt = DateTime.UtcNow;
-
     }
 
     public void RemoveDiscount()
     {
-        if (DiscountedPrice == null) throw new BusinessRuleException("NO_DISCOUNT", "No discount to remove.");
         DiscountedPrice = null;
         UpdatedAt = DateTime.UtcNow;
     }
 
     public void UpdateDetails(string name, string description, string category)
     {
-        if (string.IsNullOrWhiteSpace(name)) throw new InvariantViolationException("Product name cannot be empty.");
-        Name = name.Trim();
-        Description = description.Trim();
+        Name = name;
+        Description = description;
         Category = category;
         UpdatedAt = DateTime.UtcNow;
     }
 
-    public void Deactivate()
-    {
-        if (!isActive) throw new BusinessRuleException("ALREADY_INACTIVE", "Product is already inactive.");
-        isActive = false;
-        UpdatedAt = DateTime.UtcNow;
-    }
-
-    public void Activate()
-    {
-        if (isActive) throw new BusinessRuleException("ALREADY_ACTIVE", "Product is already active.");
-        isActive = true;
-        UpdatedAt = DateTime.UtcNow;
-    }
-
-
+    public void Deactivate() { IsActive = false; UpdatedAt = DateTime.UtcNow; }
+    public void Activate() { IsActive = true; UpdatedAt = DateTime.UtcNow; }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
 // INVENTORY
+// ─────────────────────────────────────────────────────────────────────────────
 public class Inventory
 {
-    public Guid Id { get; private set;}
-    public Guid ProductId { get; private set;}
-    public int TotalStock { get; private set;}
-    public int ReservedStock { get; private set;} // Locked by pending orders
-    public int LowStockThreshold { get; private set;} // For notifications
-    public DateTime LastUpdated { get; private set;}
-    public uint RowVersion { get; private set;}
-    public Product Product { get; private set;} = null!;
+    public Guid Id { get; private set; }
+    public Guid ProductId { get; private set; }
+    public int TotalStock { get; private set; }
+    public int ReservedStock { get; private set; }    // Locked by pending orders
+    public int LowStockThreshold { get; private set; }
+    public DateTime LastUpdated { get; private set; }
+    public uint RowVersion { get; private set; }      // Critical for concurrency
+
+    public Product Product { get; private set; } = null!;
+
+    // Computed property — AvailableStock is what customers can actually order
     public int AvailableStock => TotalStock - ReservedStock;
     public bool IsLowStock => AvailableStock <= LowStockThreshold;
-    private Inventory() { } // EF Core requires a parameterless constructor
+
+    private Inventory() { }
+
     public static Inventory Create(Guid productId, int initialStock, int lowStockThreshold = 10)
     {
-        if (initialStock < 0) throw new InvariantViolationException("Initial stock cannot be negative.");
+        if (initialStock < 0)
+            throw new InvariantViolationException("Initial stock cannot be negative.");
+
         return new Inventory
         {
             Id = Guid.NewGuid(),
@@ -189,27 +197,36 @@ public class Inventory
         };
     }
 
-// reserve stock for an order. Throws if not enough available stock. Caller must handle releasing if order is cancelled or fails.
+    // Reserve stock for a pending order. Throws if unavailable.
+    // This is the hot-path method — called under concurrency pressure.
     public void Reserve(int quantity)
     {
-        if (quantity <= 0) throw new InvariantViolationException("Quantity to reserve must be positive.");
-        if(quantity > AvailableStock) throw new InsufficientInventoryException(ProductId, quantity, AvailableStock);
+        if (quantity <= 0)
+            throw new InvariantViolationException("Reservation quantity must be positive.");
+        if (quantity > AvailableStock)
+            throw new InsufficientInventoryException(ProductId, quantity, AvailableStock);
+
         ReservedStock += quantity;
         LastUpdated = DateTime.UtcNow;
     }
 
-    //release reservation when order is cancelled or fails
+    // Release reservation when order is cancelled or completed
     public void Release(int quantity)
     {
-        
-        if (quantity > ReservedStock) throw new InvariantViolationException($"Cannot release {quantity} units, only {ReservedStock} units are reserved.");
+        if (quantity > ReservedStock)
+            throw new InvariantViolationException(
+                $"Cannot release {quantity} units; only {ReservedStock} are reserved.");
+
         ReservedStock -= quantity;
         LastUpdated = DateTime.UtcNow;
     }
-    //commit reservation when order is completed. This reduces total stock and reserved stock.
+
+    // Commit: when order completes, reserved → shipped (remove from total)
     public void Commit(int quantity)
     {
-        if (quantity > ReservedStock) throw new InvariantViolationException($"Cannot commit {quantity} units, only {ReservedStock} units are reserved.");
+        if (quantity > ReservedStock)
+            throw new InvariantViolationException("Cannot commit more than reserved.");
+
         ReservedStock -= quantity;
         TotalStock -= quantity;
         LastUpdated = DateTime.UtcNow;
@@ -217,41 +234,51 @@ public class Inventory
 
     public void Restock(int quantity)
     {
-        if (quantity <= 0) throw new InvariantViolationException("Restock quantity must be positive.");
+        if (quantity <= 0)
+            throw new InvariantViolationException("Restock quantity must be positive.");
+
         TotalStock += quantity;
         LastUpdated = DateTime.UtcNow;
     }
 
     public void UpdateThreshold(int newThreshold)
     {
-        if (newThreshold < 0) throw new InvariantViolationException("Low stock threshold cannot be negative.");
+        if (newThreshold < 0)
+            throw new InvariantViolationException("Low stock threshold cannot be negative.");
         LowStockThreshold = newThreshold;
-        LastUpdated = DateTime.UtcNow;
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ORDER
+// ─────────────────────────────────────────────────────────────────────────────
 public class Order
 {
     public Guid Id { get; private set; }
     public Guid UserId { get; private set; }
     public Guid ProductId { get; private set; }
     public int Quantity { get; private set; }
-    public decimal UnitPrice { get; private set; } // Snapshot of price at order time
+    public decimal UnitPrice { get; private set; }    // Snapshot of price at order time
     public decimal TotalAmount { get; private set; }
     public OrderStatus Status { get; private set; }
     public string? CancellationReason { get; private set; }
     public DateTime CreatedAt { get; private set; }
     public DateTime? UpdatedAt { get; private set; }
     public uint RowVersion { get; private set; }
+
     public User User { get; private set; } = null!;
     public Product Product { get; private set; } = null!;
     public Invoice? Invoice { get; private set; }
-    private Order() { } // EF Core requires a parameterless constructor
+
+    private Order() { }
 
     public static Order Create(Guid userId, Guid productId, int quantity, decimal unitPrice)
     {
-        if (quantity <= 0) throw new InvariantViolationException("Order quantity must be positive.");
-        if(unitPrice <= 0) throw new InvariantViolationException("Unit price must be positive");
+        if (quantity <= 0)
+            throw new InvariantViolationException("Order quantity must be positive.");
+        if (unitPrice <= 0)
+            throw new InvariantViolationException("Unit price must be positive.");
+
         return new Order
         {
             Id = Guid.NewGuid(),
@@ -267,41 +294,53 @@ public class Order
 
     public void ConfirmPayment()
     {
-        if(Status != OrderStatus.Pending) throw new BusinessRuleException("INVALID_ORDER_STATE", $"Cannot confirm payment for order in status {Status}.");
+        if (Status != OrderStatus.Pending)
+            throw new BusinessRuleException("INVALID_ORDER_TRANSITION",
+                $"Cannot confirm payment for order in '{Status}' status.");
         Status = OrderStatus.Confirmed;
         UpdatedAt = DateTime.UtcNow;
     }
 
-    public void MarkShipped(){
-        if(Status != OrderStatus.Confirmed) throw new BusinessRuleException("INVALID_ORDER_STATE", $"Cannot mark order as shipped in status {Status}.");
+    public void MarkShipped()
+    {
+        if (Status != OrderStatus.Confirmed)
+            throw new BusinessRuleException("INVALID_ORDER_TRANSITION",
+                $"Cannot ship order in '{Status}' status. Must be Confirmed first.");
         Status = OrderStatus.Shipped;
         UpdatedAt = DateTime.UtcNow;
     }
 
     public void Complete()
     {
-        if(Status != OrderStatus.Shipped) throw new BusinessRuleException("INVALID_ORDER_STATE", $"Cannot complete order in status {Status}. Must be shipped first.");
+        if (Status != OrderStatus.Shipped)
+            throw new BusinessRuleException("INVALID_ORDER_TRANSITION",
+                $"Cannot complete order in '{Status}' status. Must be Shipped first.");
         Status = OrderStatus.Completed;
         UpdatedAt = DateTime.UtcNow;
     }
 
     public void Cancel(string reason)
     {
-        if(Status == OrderStatus.Completed) throw new BusinessRuleException("INVALID_ORDER_STATE", "Cannot cancel a completed order.");
-        if(Status == OrderStatus.Cancelled) throw new BusinessRuleException("INVALID_ORDER_STATE", "Order is already cancelled.");
+        if (Status is OrderStatus.Completed or OrderStatus.Cancelled)
+            throw new BusinessRuleException("INVALID_ORDER_TRANSITION",
+                $"Cannot cancel an order in '{Status}' status.");
+        if (string.IsNullOrWhiteSpace(reason))
+            throw new InvariantViolationException("Cancellation reason is required.");
+
         Status = OrderStatus.Cancelled;
         CancellationReason = reason;
         UpdatedAt = DateTime.UtcNow;
     }
-
 }
 
-//INVOICE
+// ─────────────────────────────────────────────────────────────────────────────
+// INVOICE
+// ─────────────────────────────────────────────────────────────────────────────
 public class Invoice
 {
     public Guid Id { get; private set; }
-    public Guid UserId { get; private set; }
     public Guid OrderId { get; private set; }
+    public Guid UserId { get; private set; }
     public string InvoiceNumber { get; private set; } = null!;
     public decimal Subtotal { get; private set; }
     public decimal TaxAmount { get; private set; }
@@ -309,72 +348,86 @@ public class Invoice
     public decimal TaxRate { get; private set; }
     public InvoiceStatus Status { get; private set; }
     public DateTime IssuedAt { get; private set; }
+    public DateTime DueDate { get; private set; }
     public DateTime? PaidAt { get; private set; }
-    public DateTime? DueDate { get; private set; }
     public string? PaymentReference { get; private set; }
     public uint RowVersion { get; private set; }
-    public User User { get; private set; } = null!;
+
     public Order Order { get; private set; } = null!;
-    private Invoice() { } // EF Core requires a parameterless constructor
-    public static Invoice Create(Guid userId, Guid orderId, decimal subtotal, decimal taxRate=0.20m)
+    public User User { get; private set; } = null!;
+
+    private Invoice() { }
+
+    public static Invoice Create(Guid orderId, Guid userId, decimal subtotal,
+        decimal taxRate = 0.20m)
     {
         if (subtotal <= 0) throw new InvariantViolationException("Subtotal must be positive.");
-        if (taxRate < 0 || taxRate > 1) throw new InvariantViolationException("Tax rate must be between 0 and 1.");
+        if (taxRate < 0 || taxRate > 1)
+            throw new InvariantViolationException("Tax rate must be between 0 and 1.");
+
         var taxAmount = Math.Round(subtotal * taxRate, 2);
+
         return new Invoice
         {
             Id = Guid.NewGuid(),
-            UserId = userId,
             OrderId = orderId,
+            UserId = userId,
             InvoiceNumber = GenerateInvoiceNumber(),
             Subtotal = subtotal,
-            TaxRate = taxRate,
             TaxAmount = taxAmount,
             TotalAmount = subtotal + taxAmount,
+            TaxRate = taxRate,
             Status = InvoiceStatus.Pending,
             IssuedAt = DateTime.UtcNow,
-            DueDate = DateTime.UtcNow.AddDays(30) // default payment terms
+            DueDate = DateTime.UtcNow.AddDays(30)
         };
     }
-    
+
     public void MarkAsPaid(string paymentReference)
     {
-        if(Status != InvoiceStatus.Pending) throw new InvalidInvoiceStateException(Status.ToString(), "Void");
-        Status = InvoiceStatus.Void;
-        PaymentReference = paymentReference;
+        if (Status != InvoiceStatus.Pending)
+            throw new InvalidInvoiceStateException(Status.ToString(), "Paid");
+        if (string.IsNullOrWhiteSpace(paymentReference))
+            throw new InvariantViolationException("Payment reference is required.");
+
+        Status = InvoiceStatus.Paid;
         PaidAt = DateTime.UtcNow;
+        PaymentReference = paymentReference;
     }
 
     public void Void()
     {
-        if(Status == InvoiceStatus.Paid) throw new InvalidInvoiceStateException(Status.ToString(), "Void");
+        if (Status == InvoiceStatus.Paid)
+            throw new InvalidInvoiceStateException(Status.ToString(), "Void");
         Status = InvoiceStatus.Void;
     }
 
     public bool IsOverdue => Status == InvoiceStatus.Pending && DateTime.UtcNow > DueDate;
 
-    private static string GenerateInvoiceNumber() => $"INV-{DateTime.UtcNow:yyyyMM}-{Guid.NewGuid().ToString()[..8].ToUpper()}";
-
+    private static string GenerateInvoiceNumber()
+        => $"INV-{DateTime.UtcNow:yyyyMM}-{Guid.NewGuid().ToString()[..8].ToUpper()}";
 }
 
-//NOTIFICATION
+// ─────────────────────────────────────────────────────────────────────────────
+// NOTIFICATION
+// ─────────────────────────────────────────────────────────────────────────────
 public class Notification
 {
     public Guid Id { get; private set; }
     public Guid UserId { get; private set; }
-    public string Channel { get; private set; } = null!;
+    public string Channel { get; private set; } = null!;   // Email | SMS | Push
     public string Subject { get; private set; } = null!;
     public string Body { get; private set; } = null!;
-    public string Status { get; private set; } = null!;
-
+    public string Status { get; private set; } = null!;    // Pending | Sent | Failed
     public int RetryCount { get; private set; }
     public string? FailureReason { get; private set; }
-
     public DateTime CreatedAt { get; private set; }
     public DateTime? SentAt { get; private set; }
-    public uint RowVersion { get; private set; }
+
     public User User { get; private set; } = null!;
-    private Notification() { } // EF Core requires a parameterless constructor
+
+    private Notification() { }
+
     public static Notification Create(Guid userId, string channel, string subject, string body)
     {
         return new Notification
@@ -395,43 +448,42 @@ public class Notification
         Status = "Sent";
         SentAt = DateTime.UtcNow;
     }
+
     public void MarkFailed(string reason)
     {
         Status = "Failed";
         FailureReason = reason;
         RetryCount++;
     }
+
     public void ResetForRetry()
     {
-        if(RetryCount >= 3)
-        {
-            throw new BusinessRuleException("MAX_RETRIES_EXCEEDED", "Notification has exceeded maximum retry attempts.");
-        }
+        if (RetryCount >= 3)
+            throw new BusinessRuleException("MAX_RETRIES_EXCEEDED",
+                "Notification has exceeded maximum retry attempts.");
         Status = "Pending";
-    
     }
-
 }
 
-//AUDIT LOG
+// ─────────────────────────────────────────────────────────────────────────────
+// AUDIT LOG
+// ─────────────────────────────────────────────────────────────────────────────
 public class AuditLog
 {
     public Guid Id { get; private set; }
     public string EntityName { get; private set; } = null!;
     public string EntityId { get; private set; } = null!;
-    public string Action { get; private set; } = null!; // e.g. "Created", "Updated", "Deleted"
-    public string? OldValues { get; private set; } 
-
-    public string? NewValues { get; private set; } 
-
-    public Guid? UserId { get; private set; }
-
+    public string Action { get; private set; } = null!;     // Created | Modified | Deleted
+    public string? OldValues { get; private set; }
+    public string? NewValues { get; private set; }
+    public Guid? UserId { get; private set; }              // Who performed the action
     public string? IpAddress { get; private set; }
     public DateTime Timestamp { get; private set; }
-   
 
-    private AuditLog() { } // EF Core requires a parameterless constructor
-    public static AuditLog Create(string entityName, string entityId, string action, string? oldValues, string? newValues, Guid? userId, string? ipAddress = null)
+    private AuditLog() { }
+
+    public static AuditLog Create(string entityName, string entityId, string action,
+        string? oldValues, string? newValues, Guid? userId, string? ipAddress = null)
     {
         return new AuditLog
         {
